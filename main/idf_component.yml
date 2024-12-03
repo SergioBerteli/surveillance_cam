@@ -1,0 +1,5 @@
+dependencies:
+  espressif/esp32-camera:
+    version: "*"
+    override_path: "/home/facul/esp_idf/esp-idf-v5.3.1"
+  

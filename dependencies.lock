@@ -1,0 +1,16 @@
+dependencies:
+  espressif/esp32-camera:
+    dependencies: []
+    source:
+      path: /home/facul/esp_idf/esp-idf-v5.3.1
+      type: local
+    version: '*'
+  idf:
+    source:
+      type: idf
+    version: 5.3.1
+direct_dependencies:
+- espressif/esp32-camera
+manifest_hash: 28d128681461467d1511b2c6eacb99281036373c30609516308698374df874d8
+target: esp32
+version: 2.0.0
