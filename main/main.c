@@ -13,8 +13,21 @@
 // json testes
 #include "cJSON.h"
 
-// virtual file system para rest api
-#include "esp_vfs.h"
+// tcp ip socket
+#include <stdio.h> 
+#include <netdb.h> 
+#include <netinet/in.h> 
+#include <stdlib.h> 
+#include <string.h> 
+#include <sys/socket.h> 
+#include <sys/types.h> 
+#include <unistd.h> // read(), write(), close()
+
+#define MAX 80 // numero maximo de conecções 
+#define PORT 8081  // porta da comunicação tcp ip
+#define SA struct sockaddr 
+
+
 
 static const char *TAG = "esp32-cam Webserver";
 
@@ -25,12 +38,88 @@ static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 
 #define CONFIG_XCLK_FREQ 20000000 
 
-#define SCRATCH_BUFSIZE (10240)
+void switch_led() {
 
-typedef struct rest_server_context { // contexto para api rest (exemplo rest api esp idf)
-    char base_path[ESP_VFS_PATH_MAX + 1];
-    char scratch[SCRATCH_BUFSIZE];
-} rest_server_context_t;
+}
+// Function designed for chat between client and server. 
+void handle_tcp_messages(int connfd) 
+{ 
+    char buff[MAX]; 
+    int n; 
+    // infinite loop for chat 
+    for (;;) { 
+        bzero(buff, MAX); 
+  
+        // read the message from client and copy it in buffer 
+        read(connfd, buff, sizeof(buff)); 
+        // print buffer which contains the client contents 
+        printf("From client: %s\n", buff); 
+        bzero(buff, MAX); 
+        n = 0; 
+        // copy server message in the buffer 
+  
+        // if msg contains "Exit" then server exit and chat ended. 
+        if (strncmp("exit", buff, 4) == 0) { 
+            printf("Server Exit...\n"); 
+            break; 
+        } 
+    } 
+} 
+
+void cria_socket(void *pvParameter) // instancia o socket para fazer a comunicação tcp ip
+{ 
+    int sockfd, connfd, len; 
+    struct sockaddr_in servaddr, cli; 
+  
+    // socket create and verification 
+    sockfd = socket(AF_INET, SOCK_STREAM, 0); 
+    if (sockfd == -1) { 
+        printf("socket creation failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("Socket successfully created..\n"); 
+    bzero(&servaddr, sizeof(servaddr)); 
+  
+    // assign IP, PORT 
+    servaddr.sin_family = AF_INET; 
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    servaddr.sin_port = htons(PORT); 
+  
+    // Binding newly created socket to given IP and verification 
+    if ((bind(sockfd, (SA*)&servaddr, sizeof(servaddr))) != 0) { 
+        printf("socket bind failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("Socket successfully binded..\n"); 
+  
+    // Now server is ready to listen and verification 
+    if ((listen(sockfd, 5)) != 0) { 
+        printf("Listen failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("Server listening..\n"); 
+    len = sizeof(cli); 
+  
+    // Accept the data packet from client and verification 
+    connfd = accept(sockfd, (SA*)&cli, (long unsigned int *)&len); 
+    if (connfd < 0) { 
+        printf("server accept failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("server accept the client...\n"); 
+  
+    // Function for chatting between client and server 
+    handle_tcp_messages(connfd); 
+  
+    // After chatting close the socket 
+    close(sockfd); 
+} 
+
+
 
 
 static esp_err_t init_camera(void)
@@ -129,54 +218,40 @@ esp_err_t jpg_stream_httpd_handler(httpd_req_t *req){
         int64_t frame_time = fr_end - last_frame;
         last_frame = fr_end;
         frame_time /= 1000;
-        ESP_LOGI(TAG, "MJPG: %luKB %lums (%.1ffps)",
+        /*ESP_LOGI(TAG, "MJPG: %luKB %lums (%.1ffps)",
             (uint32_t)(_jpg_buf_len/1024),
-            (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time);
+            (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time); */
     }
 
     last_frame = 0;
     return res;
 }
 
-esp_err_t led_httpd_handler (httpd_req_t *req){
-    httpd_resp_set_type(req, "application/json");
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "raw", esp_random() % 20);
-    const char *sys_info = cJSON_Print(root);
-    httpd_resp_sendstr(req, sys_info);
-    free((void *)sys_info);
-    cJSON_Delete(root);
-    return ESP_OK;
 
-}
-
-
-httpd_handle_t setup_server(void)
+httpd_handle_t setup_server_video_stream(void) 
 {
+/* 
+    Como eu não estava conseguindo fazer outras requisições gets, deidi criar duas intancias do server HTTP
+*/
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    rest_server_context_t *rest_context = calloc(1, sizeof(rest_server_context_t));
+    config.server_port = 80;
     httpd_handle_t stream_httpd  = NULL;
 
-    httpd_uri_t uri_get_led = {
-        .uri = "/led",
-        .method = HTTP_GET,
-        .handler = led_httpd_handler,
-        .user_ctx = rest_context
-    };
     httpd_uri_t uri_get = {
         .uri = "/",
         .method = HTTP_GET,
         .handler = jpg_stream_httpd_handler,
-        .user_ctx = rest_context
+        .user_ctx = NULL 
     };
     if (httpd_start(&stream_httpd , &config) == ESP_OK)
     {
         httpd_register_uri_handler(stream_httpd , &uri_get);
-        httpd_register_uri_handler(stream_httpd , &uri_get_led);
     }
 
     return stream_httpd;
 }
+
+
 
 
 /* 
@@ -216,7 +291,9 @@ void app_main()
             printf("err: %s\n", esp_err_to_name(err));
             return;
         }
-        setup_server();
+        //cria_socket(NULL);
+        xTaskCreate(&cria_socket, "socket_mob_app", 2048, NULL, 18, NULL);
+        setup_server_video_stream();
         ESP_LOGI(TAG, "ESP32 CAM Web Server is up and running\n");
     }
     else
