@@ -23,7 +23,32 @@
 #include <sys/types.h> 
 #include <unistd.h> // read(), write(), close()
 
-#define MAX 80 // numero maximo de conecções 
+// gpio libs
+#include <inttypes.h>
+#include "esp_event.h"
+#include "esp_netif.h"
+
+// Bibliotecas para o uso de ferramentas do FreeRtos e da esp
+#include "freertos/queue.h"
+ 
+#define GPIO_OUTPUT_IO_0     CONFIG_GPIO_OUTPUT_0 // GPIO que irá ligar os leds
+
+#define ESP_INTR_FLAG_DEFAULT 0
+
+// Cria a fila para armazenar os eventos
+static QueueHandle_t gpio_evt_queue = NULL;
+
+
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{                                                       
+    // Função para o tratamento dos eventos nos pinos
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL); 
+}                                                       
+
+ 
+ // defines para comunicação tcp ip
+#define MAX 80 // limite de caracteres no buffer de mensagem da comunicação via socket
 #define PORT 8081  // porta da comunicação tcp ip
 #define SA struct sockaddr 
 
@@ -38,34 +63,51 @@ static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 
 #define CONFIG_XCLK_FREQ 20000000 
 
+int cnt = 0;
+// funçao para ligar/desligar os leds infravermelhos
 void switch_led() {
-
+    cnt++;
+    gpio_set_level(GPIO_OUTPUT_IO_0, cnt % 2);
 }
 // Function designed for chat between client and server. 
-void handle_tcp_messages(int connfd) 
+void handle_tcp_messages(void * pvParameter) 
 { 
     char buff[MAX]; 
-    int n; 
+    int  connfd = (int) pvParameter; 
     // infinite loop for chat 
     for (;;) { 
-        bzero(buff, MAX); 
+        bzero(buff, MAX);  // zera o buffer
   
         // read the message from client and copy it in buffer 
         read(connfd, buff, sizeof(buff)); 
         // print buffer which contains the client contents 
         printf("From client: %s\n", buff); 
-        bzero(buff, MAX); 
-        n = 0; 
         // copy server message in the buffer 
   
+        if (strcmp("led\n", buff) == 0) { 
+            printf("led aceso!");
+        }
         // if msg contains "Exit" then server exit and chat ended. 
-        if (strncmp("exit", buff, 4) == 0) { 
+         
+        if (strncmp("exit\n", buff, 4) == 0 || strcmp("\n", buff) == 0) { 
+
             printf("Server Exit...\n"); 
-            break; 
+            break;
         } 
     } 
-} 
 
+    close(connfd); 
+    vTaskDelete(NULL);
+} 
+static void gpio_task_example(void* arg)
+{
+    uint32_t io_num;
+    for (;;) {
+        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+            printf("GPIO[%"PRIu32"] intr, val: %d\n", io_num, gpio_get_level(io_num));
+        }
+    }
+}
 void cria_socket(void *pvParameter) // instancia o socket para fazer a comunicação tcp ip
 { 
     int sockfd, connfd, len; 
@@ -75,7 +117,7 @@ void cria_socket(void *pvParameter) // instancia o socket para fazer a comunica�
     sockfd = socket(AF_INET, SOCK_STREAM, 0); 
     if (sockfd == -1) { 
         printf("socket creation failed...\n"); 
-        exit(0); 
+        vTaskDelete(NULL); 
     } 
     else
         printf("Socket successfully created..\n"); 
@@ -89,7 +131,8 @@ void cria_socket(void *pvParameter) // instancia o socket para fazer a comunica�
     // Binding newly created socket to given IP and verification 
     if ((bind(sockfd, (SA*)&servaddr, sizeof(servaddr))) != 0) { 
         printf("socket bind failed...\n"); 
-        exit(0); 
+        close(sockfd); 
+        vTaskDelete(NULL); 
     } 
     else
         printf("Socket successfully binded..\n"); 
@@ -97,12 +140,14 @@ void cria_socket(void *pvParameter) // instancia o socket para fazer a comunica�
     // Now server is ready to listen and verification 
     if ((listen(sockfd, 5)) != 0) { 
         printf("Listen failed...\n"); 
-        exit(0); 
+        close(sockfd); 
+        vTaskDelete(NULL); 
     } 
     else
         printf("Server listening..\n"); 
     len = sizeof(cli); 
-  
+    
+    /* Versão antiga que não aceita reconecção
     // Accept the data packet from client and verification 
     connfd = accept(sockfd, (SA*)&cli, (long unsigned int *)&len); 
     if (connfd < 0) { 
@@ -114,9 +159,26 @@ void cria_socket(void *pvParameter) // instancia o socket para fazer a comunica�
   
     // Function for chatting between client and server 
     handle_tcp_messages(connfd); 
+    */
+
+    // permitndo reconexões
+    while (1) {
+        connfd = accept(sockfd, (SA*)&cli, (long unsigned int *)&len); 
+        if (connfd < 0) { 
+            printf("server accept failed...\n"); 
+            exit(0); 
+        } 
+        else
+            printf("server accept the client...\n"); 
+    
+        // Function for chatting between client and server 
+        xTaskCreate(handle_tcp_messages, "tcp_client_handler", 4096, (void *) connfd, 18, NULL);
+
+    }
   
     // After chatting close the socket 
     close(sockfd); 
+    vTaskDelete(NULL); 
 } 
 
 
@@ -218,7 +280,7 @@ esp_err_t jpg_stream_httpd_handler(httpd_req_t *req){
         int64_t frame_time = fr_end - last_frame;
         last_frame = fr_end;
         frame_time /= 1000;
-        /*ESP_LOGI(TAG, "MJPG: %luKB %lums (%.1ffps)",
+        /*ESP_LOGI(TAG, "MJPG: %luKB %lums (%.1ffps)", // calculo de fps
             (uint32_t)(_jpg_buf_len/1024),
             (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time); */
     }
@@ -230,9 +292,6 @@ esp_err_t jpg_stream_httpd_handler(httpd_req_t *req){
 
 httpd_handle_t setup_server_video_stream(void) 
 {
-/* 
-    Como eu não estava conseguindo fazer outras requisições gets, deidi criar duas intancias do server HTTP
-*/
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     httpd_handle_t stream_httpd  = NULL;
@@ -251,27 +310,31 @@ httpd_handle_t setup_server_video_stream(void)
     return stream_httpd;
 }
 
-
-
-
-/* 
-httpd_handle_t setup_server(void)
-{
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    httpd_handle_t stream_httpd  = NULL;
-
-    if (httpd_start(&stream_httpd , &config) == ESP_OK)
-    {
-        httpd_register_uri_handler(stream_httpd , &uri_get);
-    }
-
-    return stream_httpd;
-}
-*/
-
 void app_main()
 {
     esp_err_t err;
+    //zero-initialize the config structure.
+    gpio_config_t io_conf = {};
+    //disable interrupt
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pin_bit_mask = GPIO_OUTPUT_IO_0;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+
+    //create a queue to handle gpio event from isr
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    //start gpio task
+    xTaskCreate(gpio_task_example, "gpio_task_example", 2048, NULL, 10, NULL);
+
+    //install gpio isr service
+    //gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -292,7 +355,14 @@ void app_main()
             return;
         }
         //cria_socket(NULL);
+        //TaskHandle_t xHandle = NULL;
         xTaskCreate(&cria_socket, "socket_mob_app", 2048, NULL, 18, NULL);
+        /*configASSERT( xHandle );
+        // Use the handle to delete the task.
+        if( xHandle != NULL )
+        {
+        vTaskDelete( xHandle );
+        }*/
         setup_server_video_stream();
         ESP_LOGI(TAG, "ESP32 CAM Web Server is up and running\n");
     }
